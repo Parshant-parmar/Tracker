@@ -2,7 +2,7 @@ import 'fake-indexeddb/auto';
 import assert from 'node:assert/strict';
 import { loadAll } from '../src/lib/db.js';
 import * as A from '../src/lib/actions.js';
-import { derive, dayTotals } from '../src/lib/logic.js';
+import { derive, dayTotals, duration } from '../src/lib/logic.js';
 import { buildBackup, parseBackup, planImport, applyImport } from '../src/lib/backup.js';
 import { todayKey, addDays, localMs, formatDuration } from '../src/lib/time.js';
 
@@ -100,4 +100,69 @@ assert.equal(again.sessions.add, 0); assert.equal(again.sessions.same, 9); ok('r
 const bad = JSON.parse(JSON.stringify(backup)); bad.sessions[0].endDateTime = bad.sessions[0].startDateTime - 1;
 assert.throws(() => parseBackup(JSON.stringify(bad)), /problems/); ok('corrupt backup rejected before any write');
 assert.throws(() => parseBackup(JSON.stringify({ ...backup, schemaVersion: 99 })), /newer/); ok('newer schema rejected with clear message');
+
+// 8. Reduce Time
+await A.deleteAllData();
+const R = (day, a, b, endDay = day) => add(day, a, b, endDay);
+const shown = (s) => formatDuration(duration(s));
+const cur = async (id) => (await loadAll()).sessions.find((x) => x.id === id);
+const r1 = await R(d(10), '18:00', '20:00');
+await A.reduceTime(r1.id, 20);
+let c = await cur(r1.id);
+assert.equal(shown(c), '1h 40m'); assert.equal(c.startDateTime, r1.startDateTime); assert.equal(c.endDateTime, r1.endDateTime); ok('reduce 20m on 2h = 1h 40m, timestamps untouched');
+const r2 = await R(d(9), '10:00', '10:30');
+await rejects(A.reduceTime(r2.id, 40), 'too-much'); assert.equal((await cur(r2.id)).excludedDuration, 0); ok('reducing more than the session is rejected');
+for (const bad of [-5, 0, 1.5, NaN, '', 'abc', '2.5']) await rejects(A.reduceTime(r2.id, bad), 'invalid');
+ok('negative, zero, decimal, invalid and empty input rejected');
+await A.reduceTime(r1.id, 10); c = await cur(r1.id);
+assert.equal(shown(c), '1h 30m'); assert.equal(c.excludedDuration, 30 * 60000); ok('second reduction: 1h 30m, excludedDuration = 30m');
+await rejects(A.reduceTime(r1.id, 100), 'too-much'); ok('cumulative reduction cannot exceed the session');
+await A.reduceTime(r1.id, 30, 'set'); assert.equal(shown(await cur(r1.id)), '1h 30m');
+await A.reduceTime(r1.id, 15, 'set'); assert.equal(shown(await cur(r1.id)), '1h 45m'); ok('edit reduction sets the total');
+await A.reduceTime(r1.id, 0, 'set'); assert.equal(shown(await cur(r1.id)), '2h 0m'); await A.reduceTime(r1.id, 20, 'set');
+const mid = await R(d(8), '23:50', '01:10', d(7));
+await A.reduceTime(mid.id, 20); c = await cur(mid.id);
+assert.equal(shown(c), '1h 0m'); assert.equal(c.dayKey, d(8)); ok('midnight crossing: 1h 20m - 20m = 1h, stays on start day');
+const act1 = await A.startSession();
+await rejects(A.reduceTime(act1.id, 5), 'active'); await new Promise((r) => setTimeout(r, 20)); await A.endSession(act1.id); await A.deleteSession(act1.id); ok('active session cannot be reduced');
+
+// reports use effective duration
+await A.deleteAllData();
+const e1 = await R(d(3), '18:00', '20:00'); const e2 = await R(d(3), '20:30', '21:30');
+await A.reduceTime(e1.id, 20);
+await A.endDay(d(3));
+dv = derive(await loadAll(), today);
+assert.equal(formatDuration(dayTotals(dv.sessionsByDay.get(d(3))).total), '2h 40m'); ok('day report total uses effective duration');
+const la = await R(d(2), '09:00', '10:50'); await A.endDay(d(2));
+dv = derive(await loadAll(), today);
+assert.equal(formatDuration(dv.overall.total), '4h 30m'); assert.equal(formatDuration(dv.overall.longest), '1h 50m');
+assert.equal(formatDuration(dv.months[0].total), '4h 30m'); assert.equal(formatDuration(dv.months[0].longest), '1h 50m'); ok('statistics, monthly total and longest session use effective duration');
+for (let i = 0; i < 5; i++) { await R(d(30 - i), '08:00', '09:00'); await A.endDay(d(30 - i)); }
+dv = derive(await loadAll(), today);
+assert.equal(dv.completedCycles.length, 1);
+assert.equal(formatDuration(dv.cycleReports[0].total), '9h 30m'); ok('7-day total uses effective duration');
+
+// reopen keeps reduction; editing timestamps recalculates; delete removes together
+await A.reopenDay(d(3)); await A.endDay(d(3));
+assert.equal(shown(await cur(e1.id)), '1h 40m'); ok('reopened day keeps the reduction');
+await A.saveSession({ id: e1.id, startMs: localMs(d(3), '17:00'), endMs: localMs(d(3), '20:00') }); c = await cur(e1.id);
+assert.equal(shown(c), '2h 40m'); assert.equal(c.excludedDuration, 20 * 60000); ok('editing timestamps recalculates effective duration');
+await rejects(A.saveSession({ id: e1.id, startMs: localMs(d(3), '19:50'), endMs: localMs(d(3), '20:00') }), 'invalid'); ok('shrinking a session below its reduction is rejected');
+await A.deleteSession(e2.id); assert.equal(await cur(e2.id), undefined); ok('deleting a session removes it with its reduction');
+
+// export / import
+const withRed = await loadAll();
+const bk = JSON.parse(JSON.stringify(buildBackup(withRed)));
+assert.equal(bk.sessions.find((x) => x.id === e1.id).excludedDuration, 20 * 60000); ok('export includes excludedDuration');
+const snapshot = withRed.sessions.map((x) => [x.id, x.startDateTime, x.endDateTime, duration(x)]).sort();
+await A.deleteAllData();
+const afterImp = await applyImport(planImport(parseBackup(JSON.stringify(bk)), await loadAll()));
+assert.deepEqual(afterImp.sessions.map((x) => [x.id, x.startDateTime, x.endDateTime, duration(x)]).sort(), snapshot); ok('import restores reductions, timestamps and effective durations');
+const again2 = planImport(parseBackup(JSON.stringify(bk)), await loadAll());
+assert.equal(again2.sessions.add, 0); assert.equal(again2.sessions.replace, 0); ok('re-import creates no duplicates');
+const old = JSON.parse(JSON.stringify(bk)); delete old.sessions[0].excludedDuration;
+assert.equal(parseBackup(JSON.stringify(old)).sessions[0].excludedDuration, 0); ok('older backups without excludedDuration import as 0');
+const badRed = JSON.parse(JSON.stringify(bk)); badRed.sessions[0].excludedDuration = 1e12;
+assert.throws(() => parseBackup(JSON.stringify(badRed)), /reduced time/); ok('invalid excludedDuration rejected on import');
+
 console.log(`\nAll ${n} checks passed.`);
