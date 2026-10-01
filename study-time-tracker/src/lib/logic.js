@@ -2,7 +2,12 @@
 import { dayNum, compareKeys, monthKeyOf, addDays } from './time.js';
 
 export const CYCLE_LENGTH = 7;
-export const duration = (s) => s.endDateTime - s.startDateTime;
+// Raw span between start and end. Internal only; never shown to the user.
+export const rawDuration = (s) => s.endDateTime - s.startDateTime;
+export const excluded = (s) => (Number.isFinite(s.excludedDuration) && s.excludedDuration > 0 ? s.excludedDuration : 0);
+// Always derived from the timestamps; the stored reduction is never applied cumulatively.
+// This is the only duration the UI and every report use.
+export const duration = (s) => rawDuration(s) - excluded(s);
 
 export function groupByDay(sessions) {
   const m = new Map();
