@@ -33,7 +33,7 @@ export async function initApp(version) {
 // ---------- sessions ----------
 export async function startSession() {
   const now = Date.now();
-  const rec = { id: uid(), startDateTime: now, endDateTime: null, status: 'active', dayKey: dayKeyOf(now), createdAt: now, updatedAt: now };
+  const rec = { id: uid(), startDateTime: now, endDateTime: null, status: 'active', dayKey: dayKeyOf(now), excludedDuration: 0, createdAt: now, updatedAt: now };
   try {
     await transact(['sessions', 'days', 'examModes'], 'readwrite', async (tx) => {
       const sess = tx.objectStore('sessions');
@@ -61,7 +61,7 @@ export async function endSession(id) {
       const s = await r(sess.get(id));
       if (!s || s.status !== 'active') throw new AppError('There is no active session to end.', 'no-active');
       if (now <= s.startDateTime) throw new AppError('The current time is not after the start time. Check the device clock.', 'clock');
-      saved = { ...s, endDateTime: now, status: 'completed', updatedAt: now };
+      saved = { ...s, endDateTime: now, status: 'completed', excludedDuration: s.excludedDuration || 0, updatedAt: now };
       await r(sess.put(saved));
     });
     await verify('sessions', saved);
@@ -89,11 +89,13 @@ export async function saveSession({ id, startMs, endMs }) {
         const old = await r(sess.get(id));
         if (!old) throw new AppError('That session no longer exists.', 'missing');
         if (old.status !== 'completed') throw new AppError('End the active session before editing it.', 'active');
-        saved = { ...old, startDateTime: startMs, endDateTime: endMs, dayKey, updatedAt: now };
+        if ((old.excludedDuration || 0) > endMs - startMs)
+          throw new AppError('The reduced time would be longer than this session. Lower the reduction first.', 'invalid');
+        saved = { ...old, startDateTime: startMs, endDateTime: endMs, dayKey, excludedDuration: old.excludedDuration || 0, updatedAt: now };
       } else {
         const day = await r(tx.objectStore('days').get(dayKey));
         if (day?.status === 'completed') throw new AppError('That day is finished. Reopen it before adding sessions.', 'day-completed');
-        saved = { id: uid(), startDateTime: startMs, endDateTime: endMs, status: 'completed', dayKey, createdAt: now, updatedAt: now };
+        saved = { id: uid(), startDateTime: startMs, endDateTime: endMs, status: 'completed', dayKey, excludedDuration: 0, createdAt: now, updatedAt: now };
       }
       await r(sess.put(saved));
     });
@@ -113,6 +115,30 @@ export async function deleteSession(id) {
     });
     if (await getOne('sessions', id)) throw new AppError('The session could not be deleted.', 'verify');
   } catch (e) { throw wrap(e, 'We couldn’t delete this session. Nothing was changed.'); }
+}
+
+// Reduce Time. mode 'add' removes `minutes` more; mode 'set' sets the total reduction.
+// Timestamps are never touched; only excludedDuration changes.
+export const REDUCE_TOO_MUCH = 'You can’t reduce more time than the session duration.';
+export async function reduceTime(id, minutes, mode = 'add') {
+  const now = Date.now();
+  let saved;
+  try {
+    if (typeof minutes === 'string') minutes = minutes.trim() === '' || !/^\d+$/.test(minutes.trim()) ? NaN : Number(minutes.trim());
+    if (!Number.isInteger(minutes) || minutes < (mode === 'set' ? 0 : 1)) throw new AppError('Enter a whole number of minutes.', 'invalid');
+    await transact(['sessions'], 'readwrite', async (tx) => {
+      const sess = tx.objectStore('sessions');
+      const s = await r(sess.get(id));
+      if (!s) throw new AppError('That session no longer exists.', 'missing');
+      if (s.status !== 'completed') throw new AppError('End the session before reducing its time.', 'active');
+      const total = (mode === 'set' ? 0 : (s.excludedDuration || 0)) + minutes * 60000;
+      if (total > s.endDateTime - s.startDateTime) throw new AppError(REDUCE_TOO_MUCH, 'too-much');
+      saved = { ...s, excludedDuration: total, updatedAt: now };
+      await r(sess.put(saved));
+    });
+    await verify('sessions', saved);
+    return saved;
+  } catch (e) { throw wrap(e, SAVE_FAIL); }
 }
 
 // ---------- days & cycles ----------
