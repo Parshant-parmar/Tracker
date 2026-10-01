@@ -93,7 +93,12 @@ export function parseBackup(text) {
     if (!isValidKey(dayKey)) { err(`${at}: invalid day.`); return null; }
     const createdAt = isNum(s.createdAt) ? s.createdAt : s.startDateTime;
     const updatedAt = isNum(s.updatedAt) ? s.updatedAt : createdAt;
-    return { id: s.id, startDateTime: s.startDateTime, endDateTime: hasEnd ? s.endDateTime : null, status: s.status, dayKey, createdAt, updatedAt };
+    let excludedDuration = 0;
+    if (s.excludedDuration !== undefined && s.excludedDuration !== null) {
+      if (!Number.isInteger(s.excludedDuration) || s.excludedDuration < 0 || (hasEnd ? s.excludedDuration > s.endDateTime - s.startDateTime : s.excludedDuration !== 0)) { err(`${at}: invalid reduced time.`); return null; }
+      excludedDuration = s.excludedDuration;
+    }
+    return { id: s.id, startDateTime: s.startDateTime, endDateTime: hasEnd ? s.endDateTime : null, status: s.status, dayKey, excludedDuration, createdAt, updatedAt };
   });
   if (sessions.filter((s) => s && s.status === 'active').length > 1) err('The backup contains more than one active session.');
 
