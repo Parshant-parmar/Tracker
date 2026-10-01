@@ -3,6 +3,7 @@ import { useStore } from '../store.jsx';
 import { Link, go } from '../router.jsx';
 import { Button, Confirm, Modal, Page, Stat } from '../ui.jsx';
 import SessionRow from '../components/SessionRow.jsx';
+import ReduceTimeDialog from '../components/ReduceTimeDialog.jsx';
 import SessionForm from '../components/SessionForm.jsx';
 import { deleteSession, endDay, reopenDay } from '../lib/actions.js';
 import { dayTotals } from '../lib/logic.js';
@@ -12,6 +13,7 @@ export default function DayView({ dayKey }) {
   const { derived, today, act, lastCycle, setLastCycle } = useStore();
   const [form, setForm] = useState(null); // {session?} 
   const [del, setDel] = useState(null);
+  const [reduce, setReduce] = useState(null); // {session, mode}
   const [dialog, setDialog] = useState(null);
   const [busy, setBusy] = useState(false);
 
@@ -68,7 +70,8 @@ export default function DayView({ dayKey }) {
         <ul className="sessions">
           {recorded.map((s, i) => (
             <SessionRow key={s.id} session={s} number={i + 1} showDuration={completed}
-              onEdit={() => setForm({ session: s })} onDelete={() => setDel(s)} />
+              onEdit={() => setForm({ session: s })} onDelete={() => setDel(s)}
+              onReduce={() => setReduce({ session: s, mode: 'add' })} onEditReduction={() => setReduce({ session: s, mode: 'edit' })} />
           ))}
           {active && (
             <li className="session"><div className="session-main"><span className="session-name">In progress</span>
@@ -84,6 +87,7 @@ export default function DayView({ dayKey }) {
       </div>
 
       {form && <SessionForm session={form.session} defaultDate={dayKey} onClose={() => setForm(null)} />}
+      {reduce && <ReduceTimeDialog session={reduce.session} mode={reduce.mode} onClose={() => setReduce(null)} />}
       {del && (
         <Confirm title="Delete this session?" danger confirmLabel="Delete" busy={busy} onCancel={() => setDel(null)} onConfirm={onDelete}>
           <p>{formatTime(del.startDateTime)} → {formatTime(del.endDateTime)} on {formatDayLong(del.dayKey)}</p>
