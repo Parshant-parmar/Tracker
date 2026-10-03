@@ -1,6 +1,0 @@
-services:
-  - type: web
-    name: study-time-tracker
-    runtime: static
-    buildCommand: npm install && npm run build
-    staticPublishPath: dist
